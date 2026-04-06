@@ -93,4 +93,4 @@ See `.env.template` and `redeem/poly_redeem.py`.
 
 ## License
 
-Specify your license here if you publish this repository.
+[MIT](LICENSE) — permissive open license; use at your own risk (especially around keys and on-chain actions).
