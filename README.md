@@ -16,9 +16,9 @@ Small Python utility to **redeem resolved Polymarket positions on Polygon** usin
 
    ```bash
    # Windows
-   copy env.template .env
+   copy .env.template .env
    # macOS / Linux
-   cp env.template .env
+   cp .env.template .env
    ```
 
    Edit `.env` with your keys and wallet address. The script loads `.env` from the **repository root** (next to this README).
@@ -60,7 +60,7 @@ python redeem/poly_redeem.py --dry-run --user 0xYourAddress
 \* Not required for `--dry-run`.  
 † Required for Data API lookups (and must match the wallet that holds positions).
 
-Optional tuning: `POLY_REDEEM_BATCH`, `POLY_REDEEM_RELAYER_WAIT`, `POLY_REDEEM_DATA_RETRIES`. See `env.template` and the module docstring in `redeem/poly_redeem.py`.
+Optional tuning: `POLY_REDEEM_BATCH`, `POLY_REDEEM_RELAYER_WAIT`, `POLY_REDEEM_DATA_RETRIES`. See `.env.template` and the module docstring in `redeem/poly_redeem.py`.
 
 ## Security
 
