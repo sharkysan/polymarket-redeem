@@ -1,96 +1,79 @@
 # polymarket-redeem
 
-Small Python utility to **redeem resolved Polymarket positions on Polygon** using the Polymarket builder relayer. It pulls `redeemable=true` rows from the Polymarket Data API (including dust), **drops rows that are already redeemed on-chain** (by default: ERC1155 balance on **both** the CTF and the NegRisk adapter, across **your Polymarket Gnosis Safe** derived from the signing EOA, plus `proxyWallet` and `POLYMARKET_WALLET_ADDRESS`—or via optional `eth_call` simulation), then builds the right contract calls for standard CTF vs neg-risk markets and submits them through the relayer.
+Automate **claiming / redeeming** resolved [**Polymarket**](https://polymarket.com) positions on **Polygon** using the Polymarket **PROXY** relayer (gasless execution with [Builder API keys](https://docs.polymarket.com/builders/api-keys)).
 
-For the on-chain filter to see tokens held in the Safe, your **`POLYMARKET_PRIVATE_KEY`** must be in `.env` even for `--dry-run`. Without it, the script only checks `proxyWallet` / wallet address and the filter is often wrong.
+The included tool polls the Data API for `redeemable=true` rows and submits **`redeemPositions`** on the Conditional Tokens contract through the same proxy meta-transaction flow the app can use.
 
-Each run prints an **on-chain filter summary** (how many rows still hold tokens vs already redeemed vs RPC issues). Only rows that still hold tokens appear under **Planned** bullet list.
+## What’s in this repo
 
-## Setup
+| Path | Role |
+|------|------|
+| [`redeem/auto_claim_proxy.py`](redeem/auto_claim_proxy.py) | Python loop: fetch positions → build proxy relayer payload → submit → poll. Supports **`--dry-run`**. |
+| [`.env.template`](.env.template) | Copy to **`.env`** at the repo root; documents required and optional variables (including extras if you use other redeem scripts with the same file). |
 
-1. Python 3.10+ recommended.
+Run everything from the **repository root** so `.env` is found next to `README.md`.
 
-2. Install dependencies:
+The shared [`.env.template`](.env.template) also lists commented variables (e.g. `POLY_REDEEM_*`) for **other** Polymarket redeem automation you may keep in the same repo; they are not required for `auto_claim_proxy.py`.
+
+## Requirements
+
+- **Python 3.10+**
+- Install deps (prefer a [venv](https://docs.python.org/3/tutorial/venv.html)):
+
+  ```bash
+  pip install -r requirements.txt
+  ```
+
+## Quick start
+
+1. Copy **`.env.template`** → **`.env`** in the repo root.
+2. Set at minimum:
+   - **`POLYMARKET_PRIVATE_KEY`** (or `PRIVATE_KEY` / `POLY_PRIVATE_KEY`) — signer for your Polymarket account  
+   - **`POLYMARKET_WALLET_ADDRESS`** (or `USER_ADDRESS`) — address the Data API uses for your positions (`user=` query)  
+   - For **live** redeem: **`POLYMARKET_BUILDER_API_KEY`**, **`POLYMARKET_BUILDER_SECRET`**, **`POLYMARKET_BUILDER_PASSPHRASE`** (do not prefix the API key with a stray `.`)
+3. Sanity check without sending transactions:
 
    ```bash
-   pip install -r requirements.txt
+   python redeem/auto_claim_proxy.py --dry-run
    ```
 
-3. Configure environment variables:
+4. Live loop (submits via relayer):
 
    ```bash
-   # Windows
-   copy .env.template .env
-   # macOS / Linux
-   cp .env.template .env
+   python redeem/auto_claim_proxy.py
    ```
 
-   Edit `.env` with your keys and wallet address. The script loads `.env` from the **repository root** (next to this README).
+Stop with **Ctrl+C**.
 
-## Usage
+## Configuration
 
-Dry run — fetch positions and print the redemption plan without submitting:
+- **Single env file:** only **`.env`** at the **top level** is loaded (see `_load_env()` in the script).
+- Full variable list and comments: **[`.env.template`](.env.template)**.
+- **`py_builder_signing_sdk`** imports: use submodules, e.g. `from py_builder_signing_sdk.config import BuilderConfig` (the package top level often does not re-export names).
 
-```bash
-python redeem/poly_redeem.py --dry-run
-python redeem/poly_redeem.py --dry-run -v
-```
+## Environment variables (proxy script)
 
-Live redemption (prompts for confirmation unless you pass `--yes`):
+| Variable | When | Purpose |
+|----------|------|---------|
+| `POLYMARKET_PRIVATE_KEY` / `PRIVATE_KEY` | Always | Owner EOA private key |
+| `POLYMARKET_WALLET_ADDRESS` / `USER_ADDRESS` | Always | Data API user / profile wallet |
+| `POLYMARKET_BUILDER_*` / `BUILDER_*` | Live only | Builder HMAC for authenticated relayer `POST` |
+| `POLY_RPC_URL` / `POLYGON_RPC_URL` | Optional | Polygon JSON-RPC for gas estimation (defaults exist) |
+| `RELAYER_URL` | Optional | Default `https://relayer-v2.polymarket.com` |
+| `CHAIN_ID` | Optional | Default `137` |
+| `POLL_MS` | Optional | Loop interval in ms (default `60000`) |
 
-```bash
-python redeem/poly_redeem.py --yes
-python redeem/poly_redeem.py --batch 8 --yes
-python redeem/poly_redeem.py --limit 3
-```
+## Troubleshooting
 
-Override the address used for the Data API query:
-
-```bash
-python redeem/poly_redeem.py --dry-run --user 0xYourAddress
-```
-
-Trust the Data API only (no on-chain balance filter):
-
-```bash
-python redeem/poly_redeem.py --dry-run --no-on-chain-verify
-```
-
-### “Safe is not deployed”
-
-The builder relayer only submits txs from your **Polymarket Gnosis Safe** (address derived from `POLYMARKET_PRIVATE_KEY`). If you have not used that flow on-chain yet, deploy the Safe once:
-
-```bash
-python redeem/poly_redeem.py --deploy-safe
-```
-
-Or set `POLY_REDEEM_AUTO_DEPLOY_SAFE=1` in `.env` to deploy automatically before the first redeem.
-
-## Environment variables
-
-| Variable | Required (live) | Description |
-|----------|------------------|-------------|
-| `POLYMARKET_PRIVATE_KEY` | Yes* | Hex private key for relayer signing |
-| `POLYMARKET_WALLET_ADDRESS` | Yes† | Proxy/Safe that holds positions |
-| `POLYMARKET_BUILDER_API_KEY` | Yes | Builder API key |
-| `POLYMARKET_BUILDER_SECRET` | Yes | Builder secret |
-| `POLYMARKET_BUILDER_PASSPHRASE` | Yes | Builder passphrase |
-| `POLYMARKET_SIGNATURE_TYPE` | No (default `1`) | `1` = proxy, `0`/`2` = Safe |
-
-\* Not required for `--dry-run`.  
-† Required for Data API lookups (and must match the wallet that holds positions).
-
-Optional tuning: `POLY_REDEEM_BATCH`, `POLY_REDEEM_RELAYER_WAIT`, `POLY_REDEEM_DATA_RETRIES`, `POLY_RPC_URL`, `POLY_REDEEM_VERIFY_ONCHAIN` (`0` = no filter, same as `--no-on-chain-verify`).
-
-**On-chain filter** — `POLY_REDEEM_ONCHAIN_MODE` (default `dual`): read ERC1155 balance on **both** CTF and NegRisk adapter; keep a row if **either** balance is &gt; 0; drop only when **both** reads succeed and **both** are 0. If one RPC fails and the other is 0, the row stays (inconclusive) unless `POLY_REDEEM_AGGRESSIVE_ZERO=1`. **Legacy:** `balance` uses only the API `negativeRisk` contract. **Simulation:** `POLY_REDEEM_ONCHAIN_MODE=simulate` uses `eth_call` of the redeem calldata from your derived Safe (needs `POLYMARKET_PRIVATE_KEY`); reverting calls are treated as already redeemed.
-
-See `.env.template` and `redeem/poly_redeem.py`.
+- **`401` / invalid authorization** — regenerate Builder keys; confirm secret and passphrase match the key; no leading `.` on the API key string.
+- **No tokens / relayer skips** — the signing key must belong to the **same** Polymarket login as **`POLYMARKET_WALLET_ADDRESS`**. The dry-run prints **derived proxy vs `USER_ADDRESS`** to spot mismatches.
+- **Conda / global Python conflicts** — use a dedicated venv and `pip install -r requirements.txt` inside it.
 
 ## Security
 
-- Keep `.env` local and out of version control.
-- Treat your private key and builder credentials like production secrets.
+- Never commit **`.env`** (see `.gitignore`).
+- Treat private keys and builder secrets as production secrets; rotate if exposed.
 
 ## License
 
-[MIT](LICENSE) — permissive open license; use at your own risk (especially around keys and on-chain actions).
+See [LICENSE](LICENSE).

@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.template
+!redeem/.env.template
 
 # Python
 __pycache__/
