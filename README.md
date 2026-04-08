@@ -30,7 +30,7 @@ The shared [`.env.template`](.env.template) also lists commented variables (e.g.
 2. Set at minimum:
    - **`POLYMARKET_PRIVATE_KEY`** (or `PRIVATE_KEY` / `POLY_PRIVATE_KEY`) — signer for your Polymarket account  
    - **`POLYMARKET_WALLET_ADDRESS`** (or `USER_ADDRESS`) — address the Data API uses for your positions (`user=` query)  
-   - For **live** redeem: **`POLYMARKET_BUILDER_API_KEY`**, **`POLYMARKET_BUILDER_SECRET`**, **`POLYMARKET_BUILDER_PASSPHRASE`** (do not prefix the API key with a stray `.`)
+   - For **live** redeem: **`POLYMARKET_BUILDER_API_KEY`**, **`POLYMARKET_BUILDER_SECRET`**, **`POLYMARKET_BUILDER_PASSPHRASE`**
 3. Sanity check without sending transactions:
 
    ```bash
@@ -65,7 +65,7 @@ Stop with **Ctrl+C**.
 
 ## Troubleshooting
 
-- **`401` / invalid authorization** — regenerate Builder keys; confirm secret and passphrase match the key; no leading `.` on the API key string.
+- **`401` / invalid authorization** — regenerate Builder keys; confirm secret and passphrase match the key.
 - **No tokens / relayer skips** — the signing key must belong to the **same** Polymarket login as **`POLYMARKET_WALLET_ADDRESS`**. The dry-run prints **derived proxy vs `USER_ADDRESS`** to spot mismatches.
 - **Conda / global Python conflicts** — use a dedicated venv and `pip install -r requirements.txt` inside it.
 
