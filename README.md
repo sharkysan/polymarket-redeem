@@ -1,67 +1,73 @@
 # polymarket-redeem
 
-Claim **resolved** [Polymarket](https://polymarket.com) positions on **Polygon** using Polymarket’s **PROXY** relayer so you do **not** pay MATIC for those redemption transactions ([Builder API keys](https://docs.polymarket.com/builders/api-keys)).
+Claim resolved [Polymarket](https://polymarket.com) positions on Polygon with either:
 
-[`redeem/auto_claim_proxy.py`](redeem/auto_claim_proxy.py) polls the [Data API](https://data-api.polymarket.com/) for `redeemable=true` positions, wraps **`redeemPositions`** on the Conditional Tokens contract in the proxy meta-tx format, submits to the relayer, and waits for confirmation. One position per **`conditionId`** per loop (deduplicated).
+- `redeem/auto_claim_proxy.py`: direct PROXY relayer submission (Builder HMAC auth).
+- `redeem/auto_claim_cli.py`: invokes `polymarket ctf redeem` for each condition.
+
+Both scripts read the same top-level `.env` and deduplicate by `conditionId`.
 
 ## Setup
 
-- **Python 3.10+**
-- From the **repository root** (where `README.md` and `.env` live):
+- Python 3.10+
+- Run from repository root:
 
-  ```bash
-  python -m venv .venv
-  .venv\Scripts\activate          # Windows
-  # source .venv/bin/activate    # macOS / Linux
-  pip install -r requirements.txt
-  ```
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate    # macOS / Linux
+pip install -r requirements.txt
+```
 
 ## Configuration
 
-1. Copy [`.env.template`](.env.template) to **`.env`** in the repo root.
-2. Only that file is loaded (see `redeem/auto_claim_proxy.py`). Always run commands from the **top level** so the path resolves correctly.
-
-The template includes extra commented variables (e.g. `POLY_REDEEM_*`) for other tooling; **`auto_claim_proxy.py` ignores those**.
+1. Copy [`.env.template`](.env.template) to `.env` in the repository root.
+2. Run commands from repository root (`python redeem/...`) so `.env` path resolution stays consistent.
 
 ## Quick start
 
 | Step | Action |
 |------|--------|
-| 1 | Set **`POLYMARKET_PRIVATE_KEY`** (or `PRIVATE_KEY` / `POLY_PRIVATE_KEY`) and **`POLYMARKET_WALLET_ADDRESS`** (or `USER_ADDRESS`). |
-| 2 | For **live** submits, set **`POLYMARKET_BUILDER_API_KEY`**, **`POLYMARKET_BUILDER_SECRET`**, **`POLYMARKET_BUILDER_PASSPHRASE`** (or the `BUILDER_*` / `BUILDER_PASS_PHRASE` aliases). |
-| 3 | Preview without submitting: `python redeem/auto_claim_proxy.py --dry-run` |
-| 4 | Run the loop: `python redeem/auto_claim_proxy.py` — stop with **Ctrl+C**. |
+| 1 | Set `POLYMARKET_PRIVATE_KEY` (or `PRIVATE_KEY` / `POLY_PRIVATE_KEY`) and `POLYMARKET_WALLET_ADDRESS` (or `USER_ADDRESS`). |
+| 2 | For relayer live submit, set `POLYMARKET_BUILDER_API_KEY`, `POLYMARKET_BUILDER_SECRET`, `POLYMARKET_BUILDER_PASSPHRASE` (or `BUILDER_*` aliases). |
+| 3 | Dry-run proxy relayer: `python redeem/auto_claim_proxy.py --dry-run` |
+| 4 | Dry-run CLI wrapper: `python redeem/auto_claim_cli.py --dry-run` |
 
-## CLI
+## Commands
 
 | Command | Behavior |
 |---------|----------|
-| `python redeem/auto_claim_proxy.py --dry-run` | One pass: fetch API, show derived proxy vs wallet, print payload previews. Builder credentials **not** required. |
-| `python redeem/auto_claim_proxy.py` | Infinite loop: fetch → submit each new `conditionId` → poll relayer → sleep **`POLL_MS`**. |
+| `python redeem/auto_claim_proxy.py --dry-run` | One pass, no submit; prints payload previews and key/wallet checks. |
+| `python redeem/auto_claim_proxy.py` | Infinite relayer loop; submits and polls transaction state. |
+| `python redeem/auto_claim_cli.py --dry-run` | One pass; prints planned `polymarket ctf redeem` commands only. |
+| `python redeem/auto_claim_cli.py --once` | One live pass with CLI submits, then exit. |
+| `python redeem/auto_claim_cli.py` | Infinite CLI loop; sleeps `POLY_CLI_POLL_MS` (or `POLL_MS`). |
 
 ## Environment variables
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `POLYMARKET_PRIVATE_KEY`, `PRIVATE_KEY`, or `POLY_PRIVATE_KEY` | Yes | Owner EOA hex key |
-| `POLYMARKET_WALLET_ADDRESS` or `USER_ADDRESS` | Yes | Data API `user` (wallet that lists your positions) |
-| `POLYMARKET_BUILDER_API_KEY` / `BUILDER_API_KEY` | Live only | Builder HMAC `key` |
-| `POLYMARKET_BUILDER_SECRET` / `BUILDER_SECRET` | Live only | Builder secret |
-| `POLYMARKET_BUILDER_PASSPHRASE` / `BUILDER_PASS_PHRASE` | Live only | Builder passphrase |
-| `POLY_RPC_URL` or `POLYGON_RPC_URL` | No | Polygon JSON-RPC (gas estimate; defaults exist) |
-| `RELAYER_URL` | No | Default `https://relayer-v2.polymarket.com` |
-| `CHAIN_ID` | No | Default `137` |
-| `POLL_MS` | No | Loop delay in ms (default `60000`) |
+| `POLYMARKET_PRIVATE_KEY` / `PRIVATE_KEY` / `POLY_PRIVATE_KEY` | Yes | Owner EOA private key |
+| `POLYMARKET_WALLET_ADDRESS` / `USER_ADDRESS` | Yes | Data API `user` wallet address |
+| `POLYMARKET_BUILDER_API_KEY` / `BUILDER_API_KEY` | Relayer live only | Builder key |
+| `POLYMARKET_BUILDER_SECRET` / `BUILDER_SECRET` | Relayer live only | Builder secret |
+| `POLYMARKET_BUILDER_PASSPHRASE` / `BUILDER_PASS_PHRASE` | Relayer live only | Builder passphrase |
+| `RELAYER_URL` | Optional | Relayer endpoint (default `https://relayer-v2.polymarket.com`) |
+| `CHAIN_ID` | Optional | Chain id (default `137`) |
+| `POLY_RPC_URL` / `POLYGON_RPC_URL` | Optional | Polygon RPC for estimation/checks |
+| `POLL_MS` | Optional | Proxy loop poll delay in ms |
+| `POLY_CLI_BIN` | Optional | CLI executable name/path for `auto_claim_cli.py` (default `polymarket`) |
+| `POLY_CLI_POLL_MS` | Optional | Poll delay override for `auto_claim_cli.py` |
 
 ## Troubleshooting
 
-- **HTTP 401 / invalid authorization** — Create new Builder API credentials; copy **key**, **secret**, and **passphrase** together; ensure no typos or swapped fields.
-- **Nothing redeems / wrong custody** — The private key must be for the **same** Polymarket account as **`POLYMARKET_WALLET_ADDRESS`**. Use **`--dry-run`** to compare **derived proxy** (from the key) to your configured wallet.
-- **Dependency conflicts** — Use a dedicated venv and reinstall from **`requirements.txt`**.
+- `401 invalid authorization`: rotate Builder credentials and verify key/secret/passphrase belong together.
+- No redeems / wrong custody: key must be for the same Polymarket account as `POLYMARKET_WALLET_ADDRESS`.
+- CLI not found: install Polymarket CLI or set `POLY_CLI_BIN` to full executable path.
 
 ## Security
 
-Do not commit **`.env`**. Treat private keys and builder secrets as confidential; rotate if they leak.
+Never commit `.env`. Treat private keys and builder secrets as confidential.
 
 ## License
 
