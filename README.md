@@ -5,7 +5,7 @@ Claim resolved [Polymarket](https://polymarket.com) positions on Polygon with ei
 - `redeem/auto_claim_proxy.py`: direct PROXY relayer submission (Builder HMAC auth).
 - `redeem/auto_claim_cli.py`: invokes `polymarket ctf redeem` for each condition.
 
-Both scripts read the same top-level `.env` and deduplicate by `conditionId`.
+Both scripts read the same top-level `.env` and deduplicate by `conditionId`. They log to the console and, by default, append to a **rolling** log file under `logs/polymarket-redeem.log` (see `POLY_REDEEM_LOG_*` below).
 
 ## Setup
 
@@ -58,6 +58,11 @@ pip install -r requirements.txt
 | `POLL_MS` | Optional | Proxy loop poll delay in ms |
 | `POLY_CLI_BIN` | Optional | CLI executable name/path for `auto_claim_cli.py` (default `polymarket`) |
 | `POLY_CLI_POLL_MS` | Optional | Poll delay override for `auto_claim_cli.py` |
+| `POLY_REDEEM_LOG_FILE` | Optional | Log file path (absolute or relative to repo root); default `logs/polymarket-redeem.log` |
+| `POLY_REDEEM_LOG_MAX_BYTES` | Optional | Size in bytes before rotation (default `5242880`, 5 MiB) |
+| `POLY_REDEEM_LOG_BACKUPS` | Optional | Number of rotated files to keep (default `5`) |
+| `POLY_REDEEM_LOG_LEVEL` | Optional | `DEBUG`, `INFO`, `WARNING`, or `ERROR` (default `INFO`) |
+| `POLY_REDEEM_LOG_DISABLE` | Optional | Set to `1` / `true` to skip the file handler (console only) |
 
 ## Troubleshooting
 

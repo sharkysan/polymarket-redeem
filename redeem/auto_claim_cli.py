@@ -6,6 +6,7 @@ Top-level .env only:
   - POLYMARKET_WALLET_ADDRESS / USER_ADDRESS
   - POLY_CLI_BIN (optional, default: polymarket)
   - POLY_CLI_POLL_MS (optional, default: 60000)
+  - POLY_REDEEM_LOG_* (optional rolling file log; see README)
 
 Examples (run from repo root):
   python redeem/auto_claim_cli.py --dry-run
@@ -15,16 +16,18 @@ Examples (run from repo root):
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import requests
 from dotenv import load_dotenv
+
+from redeem_logging import setup_rolling_logging
 
 POSITIONS_URL = "https://data-api.polymarket.com/positions"
 
@@ -90,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _load_env()
+    log = setup_rolling_logging(script_tag="auto_claim_cli", repo_root=_repo_root())
 
     cli_bin = (os.getenv("POLY_CLI_BIN") or "polymarket").strip()
     poll_ms = int((os.getenv("POLY_CLI_POLL_MS") or os.getenv("POLL_MS") or "60000").strip())
@@ -97,31 +101,34 @@ def main(argv: list[str] | None = None) -> int:
     user_address = _user_address_from_env()
 
     if not user_address:
-        print("Set POLYMARKET_WALLET_ADDRESS or USER_ADDRESS in root .env", file=sys.stderr)
+        log.error("Set POLYMARKET_WALLET_ADDRESS or USER_ADDRESS in root .env")
         return 2
     if not args.dry_run and not private_key:
-        print(
-            "Set POLYMARKET_PRIVATE_KEY (or POLY_PRIVATE_KEY / PRIVATE_KEY) in root .env",
-            file=sys.stderr,
+        log.error(
+            "Set POLYMARKET_PRIVATE_KEY (or POLY_PRIVATE_KEY / PRIVATE_KEY) in root .env"
         )
         return 2
     if not args.dry_run and shutil.which(cli_bin) is None:
-        print(
-            f"Polymarket CLI not found: {cli_bin!r}. Install it or set POLY_CLI_BIN.",
-            file=sys.stderr,
+        log.error(
+            "Polymarket CLI not found: %r. Install it or set POLY_CLI_BIN.",
+            cli_bin,
         )
         return 2
 
-    print(f"Data API user: {user_address}")
-    print(f"CLI binary: {cli_bin}")
-    print(f"Mode: {'dry-run' if args.dry_run else 'live'}")
+    log.info("Data API user: %s", user_address)
+    log.info("CLI binary: %s", cli_bin)
+    log.info("Mode: %s", "dry-run" if args.dry_run else "live")
 
     claimed: set[str] = set()
     while True:
         try:
             rows = fetch_redeemable_positions(user_address)
             planned = planned_unique_conditions(rows, claimed)
-            print(f"\nRows={len(rows)} | planned unique conditionIds={len(planned)}")
+            log.info(
+                "Rows=%s | planned unique conditionIds=%s",
+                len(rows),
+                len(planned),
+            )
 
             for i, p in enumerate(planned, 1):
                 cid = str(p.get("conditionId"))
@@ -130,25 +137,37 @@ def main(argv: list[str] | None = None) -> int:
                 size = p.get("size")
 
                 if args.dry_run:
-                    print(
-                        f"  {i}. would run: {cli_bin} ctf redeem --condition {cid} "
-                        f"| title={title!r} outcome={outcome!r} size={size}"
+                    log.info(
+                        "  %s. would run: %s ctf redeem --condition %s | title=%r outcome=%r size=%s",
+                        i,
+                        cli_bin,
+                        cid,
+                        title,
+                        outcome,
+                        size,
                     )
                     claimed.add(cid)
                     continue
 
-                print(f"  {i}. redeem {cid} | title={title!r} outcome={outcome!r} size={size}")
+                log.info(
+                    "  %s. redeem %s | title=%r outcome=%r size=%s",
+                    i,
+                    cid,
+                    title,
+                    outcome,
+                    size,
+                )
                 proc = run_redeem_with_cli(cli_bin, private_key, cid)
                 if proc.returncode == 0:
                     if proc.stdout.strip():
-                        print(proc.stdout.strip())
+                        log.info("%s", proc.stdout.strip())
                     claimed.add(cid)
                 else:
                     msg = proc.stderr.strip() or proc.stdout.strip() or f"exit={proc.returncode}"
-                    print(f"     CLI error: {msg}", file=sys.stderr)
+                    log.error("     CLI error: %s", msg)
 
         except Exception as e:
-            print(f"Loop error: {e}", file=sys.stderr)
+            log.exception("Loop error: %s", e)
 
         if args.once or args.dry_run:
             return 0

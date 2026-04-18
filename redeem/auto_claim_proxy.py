@@ -11,6 +11,7 @@ Env (same file as ``poly_redeem.py``):
   USER_ADDRESS or POLYMARKET_WALLET_ADDRESS — Data API / profile wallet
   BUILDER_* or POLYMARKET_BUILDER_* — live submit only
   RELAYER_URL, CHAIN_ID, POLYGON_RPC_URL or POLY_RPC_URL, POLL_MS — optional
+  POLY_REDEEM_LOG_* — optional rolling file log (see README)
 
 CLI: live loop or ``--dry-run`` (one-shot plan, no submit; Builder keys optional for dry-run).
 """
@@ -19,7 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,8 @@ from web3 import Web3
 from py_builder_relayer_client.signer import Signer
 from py_builder_signing_sdk.config import BuilderConfig
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
+
+from redeem_logging import setup_rolling_logging
 
 # --- Polygon (Polymarket builder-relayer-client config / constants) ---
 PROXY_FACTORY = to_checksum_address("0xaB45c5A4B0c941a2F231C04C3f49182e1A254052")
@@ -305,6 +308,7 @@ def _planned_rows(positions: list[dict[str, Any]], claimed: set[str]) -> list[di
 
 def dry_run_once(
     *,
+    log: logging.Logger,
     relayer_url: str,
     chain_id: int,
     rpc_url: str,
@@ -316,27 +320,26 @@ def dry_run_once(
     from_addr = signer.address()
     derived_proxy = derive_proxy_wallet(from_addr, PROXY_FACTORY)
 
-    print("Dry-run: no relayer POST; Builder credentials not required.")
-    print(f"Polygon RPC: {rpc_url}")
-    print(f"Owner signer: {from_addr}")
-    print(f"Data API user (USER_ADDRESS): {user_address}")
-    print(f"Derived proxy (from key, CREATE2): {derived_proxy}")
+    log.info("Dry-run: no relayer POST; Builder credentials not required.")
+    log.info("Polygon RPC: %s", rpc_url)
+    log.info("Owner signer: %s", from_addr)
+    log.info("Data API user (USER_ADDRESS): %s", user_address)
+    log.info("Derived proxy (from key, CREATE2): %s", derived_proxy)
     if derived_proxy.lower() != to_checksum_address(user_address).lower():
-        print(
+        log.warning(
             "Note: USER_ADDRESS differs from derived proxy — ensure this matches how "
-            "Polymarket lists positions for your login.",
-            file=sys.stderr,
+            "Polymarket lists positions for your login."
         )
 
     try:
         positions = fetch_redeemable_positions(user_address)
     except Exception as e:
-        print(f"Data API error: {e}", file=sys.stderr)
+        log.error("Data API error: %s", e)
         return 1
 
     planned = _planned_rows(positions, set())
-    print(f"\nRedeemable rows from API: {len(positions)}")
-    print(f"Planned unique conditionIds: {len(planned)}")
+    log.info("Redeemable rows from API: %s", len(positions))
+    log.info("Planned unique conditionIds: %s", len(planned))
     if not planned:
         return 0
 
@@ -347,24 +350,20 @@ def dry_run_once(
             {"address": from_addr, "type": "PROXY"},
         )
     except Exception as e:
-        print(f"Relay-payload GET failed (optional for dry-run): {e}", file=sys.stderr)
+        log.warning("Relay-payload GET failed (optional for dry-run): %s", e)
         rp = {}
 
     relay_a = rp.get("address")
     nonce = rp.get("nonce")
     if relay_a is None or nonce is None:
-        print(
-            "Could not fetch relay address/nonce; listing conditions only.",
-            file=sys.stderr,
-        )
+        log.warning("Could not fetch relay address/nonce; listing conditions only.")
         for i, p in enumerate(planned, 1):
             cid = p.get("conditionId")
-            print(f"  {i}. {cid} | {p.get('title', '')!r}")
+            log.info("  %s. %s | %r", i, cid, p.get("title", ""))
         return 0
 
-    print(
-        "Dry-run uses one relay nonce for all previews; the live loop fetches a fresh nonce per redeem.",
-        file=sys.stderr,
+    log.warning(
+        "Dry-run uses one relay nonce for all previews; the live loop fetches a fresh nonce per redeem."
     )
     for i, p in enumerate(planned, 1):
         cid = str(p.get("conditionId"))
@@ -382,20 +381,29 @@ def dry_run_once(
                 metadata="redeem positions (dry-run)",
             )
         except Exception as e:
-            print(f"  {i}. {cid} — encode/build error: {e}", file=sys.stderr)
+            log.error("  %s. %s — encode/build error: %s", i, cid, e)
             continue
         d = payload["data"]
         d_preview = d[:22] + "..." + d[-8:] if len(d) > 40 else d
         sig = payload["signature"]
         sig_prev = sig[:18] + "..." if len(sig) > 22 else sig
-        print(
-            f"  {i}. condition={cid}\n"
-            f"      title={title!r}\n"
-            f"      proxyWallet={payload['proxyWallet']}  gasLimit="
-            f"{payload['signatureParams']['gasLimit']}\n"
-            f"      data ({len(d)} chars)={d_preview}\n"
-            f"      signature={sig_prev}\n"
-            f"      -> would POST to {relayer_url}{SUBMIT_TRANSACTION}"
+        log.info(
+            "  %s. condition=%s\n"
+            "      title=%r\n"
+            "      proxyWallet=%s  gasLimit=%s\n"
+            "      data (%s chars)=%s\n"
+            "      signature=%s\n"
+            "      -> would POST to %s%s",
+            i,
+            cid,
+            title,
+            payload["proxyWallet"],
+            payload["signatureParams"]["gasLimit"],
+            len(d),
+            d_preview,
+            sig_prev,
+            relayer_url,
+            SUBMIT_TRANSACTION,
         )
     return 0
 
@@ -430,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _load_env()
+    log = setup_rolling_logging(script_tag="auto_claim_proxy", repo_root=_repo_root())
 
     relayer_url = (os.getenv("RELAYER_URL") or DEFAULT_RELAYER).strip().rstrip("/")
     chain_id = int(os.getenv("CHAIN_ID") or "137")
@@ -449,15 +458,15 @@ def main(argv: list[str] | None = None) -> int:
     poll_ms = int(os.getenv("POLL_MS") or "60000")
 
     if not private_key or not user_address:
-        print(
+        log.error(
             "Set PRIVATE_KEY and USER_ADDRESS (or POLYMARKET_PRIVATE_KEY / "
-            "POLY_PRIVATE_KEY and POLYMARKET_WALLET_ADDRESS) in root .env",
-            file=sys.stderr,
+            "POLY_PRIVATE_KEY and POLYMARKET_WALLET_ADDRESS) in root .env"
         )
         return 2
 
     if args.dry_run:
         return dry_run_once(
+            log=log,
             relayer_url=relayer_url,
             chain_id=chain_id,
             rpc_url=rpc_url,
@@ -467,16 +476,14 @@ def main(argv: list[str] | None = None) -> int:
 
     bk, bs, bp = _builder_creds_from_env()
     if not bk or not bs or not bp:
-        print(
+        log.error(
             "Set BUILDER_API_KEY, BUILDER_SECRET, BUILDER_PASS_PHRASE "
-            "(or POLYMARKET_BUILDER_* )",
-            file=sys.stderr,
+            "(or POLYMARKET_BUILDER_* )"
         )
         return 2
     if bk.startswith("."):
-        print(
-            "Warning: BUILDER_API_KEY starts with '.' — causes 401; remove the leading dot.",
-            file=sys.stderr,
+        log.warning(
+            "BUILDER_API_KEY starts with '.' — causes 401; remove the leading dot."
         )
 
     builder_config = BuilderConfig(
@@ -486,21 +493,21 @@ def main(argv: list[str] | None = None) -> int:
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     if w3.is_connected():
         acct = w3.eth.account.from_key(private_key)
-        print(f"Polygon RPC: {rpc_url}")
-        print(f"Owner signer: {acct.address}")
+        log.info("Polygon RPC: %s", rpc_url)
+        log.info("Owner signer: %s", acct.address)
     else:
-        print(f"Polygon RPC: {rpc_url} (not connected; estimates may fail)")
-        print("Owner signer: <from key>")
+        log.info("Polygon RPC: %s (not connected; estimates may fail)", rpc_url)
+        log.info("Owner signer: <from key>")
 
-    print(f"Proxy wallet (Data API user): {user_address}")
-    print("Relayer mode: PROXY")
+    log.info("Proxy wallet (Data API user): %s", user_address)
+    log.info("Relayer mode: PROXY")
 
     claimed: set[str] = set()
 
     while True:
         try:
             positions = fetch_redeemable_positions(user_address)
-            print(f"\nFound {len(positions)} redeemable rows")
+            log.info("Found %s redeemable rows", len(positions))
 
             seen_round: set[str] = set()
             for p in positions:
@@ -515,9 +522,12 @@ def main(argv: list[str] | None = None) -> int:
                 if condition_id in claimed or condition_id in seen_round:
                     continue
 
-                print(
-                    f"Redeeming condition={condition_id} title={title!r} "
-                    f"outcome={outcome} size={size}"
+                log.info(
+                    "Redeeming condition=%s title=%r outcome=%s size=%s",
+                    condition_id,
+                    title,
+                    outcome,
+                    size,
                 )
                 inner = encode_redeem_positions_calldata(str(condition_id))
 
@@ -549,18 +559,18 @@ def main(argv: list[str] | None = None) -> int:
 
                 row = _poll_transaction(relayer_url, tx_id)
                 if row:
-                    print(
-                        "Redeem completed:",
+                    log.info(
+                        "Redeem completed: %s",
                         row.get("transactionHash") or row.get("state"),
                     )
                 else:
-                    print("Redeem submitted; poll timed out for", tx_id)
+                    log.warning("Redeem submitted; poll timed out for %s", tx_id)
 
                 claimed.add(str(condition_id))
                 seen_round.add(str(condition_id))
 
         except Exception as e:
-            print(f"Loop error: {e}", file=sys.stderr)
+            log.exception("Loop error: %s", e)
 
         time.sleep(poll_ms / 1000.0)
 
@@ -569,5 +579,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        print("Stopped.", file=sys.stderr)
+        logging.getLogger("polymarket_redeem.auto_claim_proxy").warning("Stopped.")
         raise SystemExit(0)

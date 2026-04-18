@@ -1,3 +1,6 @@
+# Local rolling logs (POLY_REDEEM_LOG_FILE default)
+logs/
+
 # Secrets and local config
 .env
 .env.*
