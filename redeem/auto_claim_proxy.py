@@ -44,8 +44,11 @@ PROXY_INIT_CODE_HASH = bytes.fromhex(
     "d21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b"
 )
 
-CTF_ADDRESS = to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
-USDC_E = to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+# Post-2026-04-28 V2 redeem: target the CtfCollateralAdapter (not CTF directly) and pass
+# pUSD as the collateral arg. The adapter burns the ERC-1155 outcome tokens via CTF, takes
+# the USDC.e payout, wraps it into pUSD, and forwards pUSD to the proxy wallet.
+CTF_COLLATERAL_ADAPTER = to_checksum_address("0xAdA100Db00Ca00073811820692005400218FcE1f")
+PUSD = to_checksum_address("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
 ZERO_BYTES32 = b"\x00" * 32
 
 POSITIONS_URL = "https://data-api.polymarket.com/positions"
@@ -112,7 +115,7 @@ def encode_redeem_positions_calldata(condition_id: str) -> bytes:
     )[:4]
     body = encode(
         ["address", "bytes32", "bytes32", "uint256[]"],
-        [USDC_E, ZERO_BYTES32, cid, [1, 2]],
+        [PUSD, ZERO_BYTES32, cid, [1, 2]],
     )
     return bytes(sel) + body
 
@@ -374,7 +377,7 @@ def dry_run_once(
                 private_key=private_key,
                 chain_id=chain_id,
                 rpc_url=rpc_url,
-                inner_to=CTF_ADDRESS,
+                inner_to=CTF_COLLATERAL_ADAPTER,
                 inner_calldata=inner,
                 relay_address=str(relay_a),
                 nonce=str(nonce),
@@ -546,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
                     private_key=private_key,
                     chain_id=chain_id,
                     rpc_url=rpc_url,
-                    inner_to=CTF_ADDRESS,
+                    inner_to=CTF_COLLATERAL_ADAPTER,
                     inner_calldata=inner,
                     relay_address=str(relay_a),
                     nonce=str(nonce),
