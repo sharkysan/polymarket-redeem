@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -121,16 +122,11 @@ def encode_redeem_positions_calldata(condition_id: str) -> bytes:
 
 
 def encode_proxy_transaction_data(
-    inner_to: str, inner_data: bytes, *, type_code: int = 1
+    inner_calls: list[tuple[str, bytes]], *, type_code: int = 1
 ) -> str:
-    """Wrap inner call in Polymarket proxy factory `proxy(calls)` — matches TS encodeProxyTransactionData."""
+    """Wrap one or more inner calls in Polymarket proxy factory `proxy(calls)`."""
     calls = [
-        (
-            type_code,
-            to_checksum_address(inner_to),
-            0,
-            inner_data,
-        )
+        (type_code, to_checksum_address(to), 0, data) for to, data in inner_calls
     ]
     enc_args = encode(["(uint8,address,uint256,bytes)[]"], [calls])
     return "0x" + (bytes(_PROXY_SELECTOR) + enc_args).hex()
@@ -173,6 +169,12 @@ def _relayer_get(relayer_url: str, path: str, params: dict[str, Any]) -> Any:
     return r.json()
 
 
+class RelayerQuotaError(RuntimeError):
+    def __init__(self, message: str, reset_seconds: int | None = None):
+        super().__init__(message)
+        self.reset_seconds = reset_seconds
+
+
 def _post_submit(
     relayer_url: str,
     builder_config: BuilderConfig,
@@ -194,6 +196,13 @@ def _post_submit(
             detail = r.json()
         except Exception:
             detail = r.text
+        if r.status_code == 429:
+            text = detail.get("error", "") if isinstance(detail, dict) else str(detail)
+            m = re.search(r"resets in (\d+)\s*seconds", text)
+            raise RelayerQuotaError(
+                f"relayer HTTP 429: {detail}",
+                reset_seconds=int(m.group(1)) if m else None,
+            )
         raise RuntimeError(f"relayer HTTP {r.status_code}: {detail}")
     return r.json()
 
@@ -243,8 +252,7 @@ def build_proxy_submit_payload(
     private_key: str,
     chain_id: int,
     rpc_url: str,
-    inner_to: str,
-    inner_calldata: bytes,
+    inner_calls: list[tuple[str, bytes]],
     relay_address: str,
     nonce: str,
     metadata: str,
@@ -255,7 +263,7 @@ def build_proxy_submit_payload(
     if not w3.is_connected():
         raise RuntimeError(f"RPC not connected: {rpc_url}")
 
-    data_hex = encode_proxy_transaction_data(inner_to, inner_calldata)
+    data_hex = encode_proxy_transaction_data(inner_calls)
     gas_price = "0"
     relayer_fee = "0"
     gas_limit = str(
@@ -317,6 +325,7 @@ def dry_run_once(
     rpc_url: str,
     private_key: str,
     user_address: str,
+    batch_size: int,
 ) -> int:
     """Fetch API, print each planned PROXY redeem; no Builder auth or submit."""
     signer = Signer(private_key, chain_id)
@@ -366,40 +375,40 @@ def dry_run_once(
         return 0
 
     log.warning(
-        "Dry-run uses one relay nonce for all previews; the live loop fetches a fresh nonce per redeem."
+        "Dry-run uses one relay nonce for all previews; the live loop fetches a fresh nonce per batch."
     )
-    for i, p in enumerate(planned, 1):
-        cid = str(p.get("conditionId"))
-        title = p.get("title") or ""
+    for chunk_start in range(0, len(planned), batch_size):
+        chunk = planned[chunk_start : chunk_start + batch_size]
+        batch_no = chunk_start // batch_size + 1
+        log.info("Batch %s (%s conditions):", batch_no, len(chunk))
+        for j, p in enumerate(chunk, chunk_start + 1):
+            log.info("  %s. %s | %r", j, p.get("conditionId"), p.get("title") or "")
         try:
-            inner = encode_redeem_positions_calldata(cid)
+            inner_calls = [
+                (CTF_COLLATERAL_ADAPTER, encode_redeem_positions_calldata(str(p.get("conditionId"))))
+                for p in chunk
+            ]
             payload = build_proxy_submit_payload(
                 private_key=private_key,
                 chain_id=chain_id,
                 rpc_url=rpc_url,
-                inner_to=CTF_COLLATERAL_ADAPTER,
-                inner_calldata=inner,
+                inner_calls=inner_calls,
                 relay_address=str(relay_a),
                 nonce=str(nonce),
-                metadata="redeem positions (dry-run)",
+                metadata=f"redeem positions x{len(chunk)} (dry-run)",
             )
         except Exception as e:
-            log.error("  %s. %s — encode/build error: %s", i, cid, e)
+            log.error("  Batch %s — encode/build error: %s", batch_no, e)
             continue
         d = payload["data"]
         d_preview = d[:22] + "..." + d[-8:] if len(d) > 40 else d
         sig = payload["signature"]
         sig_prev = sig[:18] + "..." if len(sig) > 22 else sig
         log.info(
-            "  %s. condition=%s\n"
-            "      title=%r\n"
-            "      proxyWallet=%s  gasLimit=%s\n"
-            "      data (%s chars)=%s\n"
-            "      signature=%s\n"
-            "      -> would POST to %s%s",
-            i,
-            cid,
-            title,
+            "  proxyWallet=%s  gasLimit=%s\n"
+            "  data (%s chars)=%s\n"
+            "  signature=%s\n"
+            "  -> would POST to %s%s",
             payload["proxyWallet"],
             payload["signatureParams"]["gasLimit"],
             len(d),
@@ -459,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         (os.getenv("USER_ADDRESS") or os.getenv("POLYMARKET_WALLET_ADDRESS") or "").strip()
     )
     poll_ms = int(os.getenv("POLL_MS") or "60000")
+    batch_size = max(1, int(os.getenv("POLY_REDEEM_BATCH_SIZE") or "20"))
 
     if not private_key or not user_address:
         log.error(
@@ -475,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
             rpc_url=rpc_url,
             private_key=private_key,
             user_address=user_address,
+            batch_size=batch_size,
         )
 
     bk, bs, bp = _builder_creds_from_env()
@@ -504,78 +515,91 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("Proxy wallet (Data API user): %s", user_address)
     log.info("Relayer mode: PROXY")
+    log.info("Batch size: %s", batch_size)
 
     claimed: set[str] = set()
 
     while True:
+        quota_hit = False
         try:
             positions = fetch_redeemable_positions(user_address)
             log.info("Found %s redeemable rows", len(positions))
 
+            eligible: list[tuple[str, bytes]] = []
             seen_round: set[str] = set()
             for p in positions:
                 condition_id = p.get("conditionId")
-                redeemable = bool(p.get("redeemable"))
-                title = p.get("title") or ""
-                outcome = p.get("outcome") or ""
-                size = p.get("size")
-
-                if not redeemable or not condition_id:
+                if not bool(p.get("redeemable")) or not condition_id:
                     continue
-                if condition_id in claimed or condition_id in seen_round:
+                cid = str(condition_id)
+                if cid in claimed or cid in seen_round:
                     continue
+                seen_round.add(cid)
+                try:
+                    eligible.append((cid, encode_redeem_positions_calldata(cid)))
+                except Exception as e:
+                    log.exception("Skipping condition=%s (encode error): %s", cid, e)
 
-                log.info(
-                    "Redeeming condition=%s title=%r outcome=%s size=%s",
-                    condition_id,
-                    title,
-                    outcome,
-                    size,
-                )
-                inner = encode_redeem_positions_calldata(str(condition_id))
-
-                from_addr = Signer(private_key, chain_id).address()
-                rp = _relayer_get(
-                    relayer_url,
-                    GET_RELAY_PAYLOAD,
-                    {"address": from_addr, "type": "PROXY"},
-                )
-                relay_a = rp.get("address")
-                nonce = rp.get("nonce")
-                if not relay_a or nonce is None:
-                    raise RuntimeError(f"Bad relay-payload: {rp!r}")
-
-                payload = build_proxy_submit_payload(
-                    private_key=private_key,
-                    chain_id=chain_id,
-                    rpc_url=rpc_url,
-                    inner_to=CTF_COLLATERAL_ADAPTER,
-                    inner_calldata=inner,
-                    relay_address=str(relay_a),
-                    nonce=str(nonce),
-                    metadata="redeem positions",
-                )
-                resp = _post_submit(relayer_url, builder_config, payload)
-                tx_id = resp.get("transactionID")
-                if not tx_id:
-                    raise RuntimeError(f"Unexpected submit response: {resp!r}")
-
-                row = _poll_transaction(relayer_url, tx_id)
-                if row:
-                    log.info(
-                        "Redeem completed: %s",
-                        row.get("transactionHash") or row.get("state"),
+            for chunk_start in range(0, len(eligible), batch_size):
+                if quota_hit:
+                    break
+                batch = eligible[chunk_start : chunk_start + batch_size]
+                cids = [cid for cid, _ in batch]
+                log.info("Redeeming batch of %s: %s", len(batch), cids)
+                try:
+                    from_addr = Signer(private_key, chain_id).address()
+                    rp = _relayer_get(
+                        relayer_url,
+                        GET_RELAY_PAYLOAD,
+                        {"address": from_addr, "type": "PROXY"},
                     )
-                else:
-                    log.warning("Redeem submitted; poll timed out for %s", tx_id)
+                    relay_a = rp.get("address")
+                    nonce = rp.get("nonce")
+                    if not relay_a or nonce is None:
+                        raise RuntimeError(f"Bad relay-payload: {rp!r}")
 
-                claimed.add(str(condition_id))
-                seen_round.add(str(condition_id))
+                    payload = build_proxy_submit_payload(
+                        private_key=private_key,
+                        chain_id=chain_id,
+                        rpc_url=rpc_url,
+                        inner_calls=[(CTF_COLLATERAL_ADAPTER, data) for _, data in batch],
+                        relay_address=str(relay_a),
+                        nonce=str(nonce),
+                        metadata=f"redeem positions x{len(batch)}",
+                    )
+                    resp = _post_submit(relayer_url, builder_config, payload)
+                    tx_id = resp.get("transactionID")
+                    if not tx_id:
+                        raise RuntimeError(f"Unexpected submit response: {resp!r}")
+
+                    row = _poll_transaction(relayer_url, tx_id)
+                    if row:
+                        log.info(
+                            "Batch redeem completed: %s",
+                            row.get("transactionHash") or row.get("state"),
+                        )
+                    else:
+                        log.warning("Batch submitted; poll timed out for %s", tx_id)
+
+                    for cid in cids:
+                        claimed.add(cid)
+                except RelayerQuotaError as e:
+                    hint = e.reset_seconds if e.reset_seconds is not None else 1800
+                    sleep_s = max(30, min(hint + 5, 3600))
+                    log.warning(
+                        "Relayer quota exceeded; sleeping %ss before next attempt",
+                        sleep_s,
+                    )
+                    time.sleep(sleep_s)
+                    quota_hit = True
+                except Exception as e:
+                    log.exception("Batch redeem failed (%s): %s", cids, e)
 
         except Exception as e:
             log.exception("Loop error: %s", e)
 
-        time.sleep(poll_ms / 1000.0)
+        if not quota_hit:
+            time.sleep(poll_ms / 1000.0)
 
 
 if __name__ == "__main__":
